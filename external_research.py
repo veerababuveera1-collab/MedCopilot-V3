@@ -9,7 +9,7 @@ def external_research_answer(query):
     # Create Groq client
     client = Groq(api_key=api_key)
 
-    # Call Groq LLaMA model
+    # Call Groq LLaMA model (valid model)
     response = client.chat.completions.create(
         model="llama-3.1-8b-instant",
         messages=[
