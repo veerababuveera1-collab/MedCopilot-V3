@@ -1,26 +1,22 @@
-from transformers import pipeline
+import os
+from groq import Groq
 
-# External research AI (fallback mode)
-external_llm = pipeline(
-    "text2text-generation",
-    model="google/flan-t5-large",
-    max_length=512
-)
+def external_research_answer(query: str):
+    client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
-def external_research_answer(question):
-    prompt = f"""
-You are a clinical research assistant.
-Answer using general medical research knowledge.
+    completion = client.chat.completions.create(
+        model="llama-3.1-8b-instant",
+        messages=[
+            {"role": "system", "content": "You are a clinical research assistant. Provide evidence-based medical answers."},
+            {"role": "user", "content": query}
+        ],
+        temperature=0.3,
+        max_tokens=700
+    )
 
-Question:
-{question}
-
-Provide professional medical explanation.
-"""
-
-    result = external_llm(prompt)[0]["generated_text"]
+    answer = completion.choices[0].message.content
 
     return {
-        "answer": result,
-        "source": "External Medical Research (AI)"
+        "answer": answer,
+        "source": "Groq LLaMA-3.1"
     }
