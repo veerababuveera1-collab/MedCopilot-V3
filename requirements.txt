@@ -2,6 +2,5 @@ streamlit
 sentence-transformers
 faiss-cpu
 pypdf
-transformers
-torch
-requests
+groq
+numpy
