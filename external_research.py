@@ -3,13 +3,8 @@ from groq import Groq
 
 def external_research_answer(query):
 
-    # Read API key from Streamlit Secrets
-    api_key = st.secrets["GROQ_API_KEY"]
+    client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 
-    # Create Groq client
-    client = Groq(api_key=api_key)
-
-    # Call Groq LLaMA model (valid model)
     response = client.chat.completions.create(
         model="llama-3.1-8b-instant",
         messages=[
