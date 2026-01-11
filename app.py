@@ -1,148 +1,81 @@
-# ================================
-# MedCopilot V3 — Hybrid Hospital AI
-# Evidence-based (PDF) + Global Medical AI
-# ================================
-
-import os
 import streamlit as st
-import faiss
+import os
 import numpy as np
-import requests
-from pypdf import PdfReader
+import faiss
 from sentence_transformers import SentenceTransformer
-from transformers import pipeline
+from pypdf import PdfReader
+from external_research import external_research_answer
 
-# --------------------------------
-# App Config
-# --------------------------------
+# ---------------- Page Config ----------------
 st.set_page_config(
-    page_title="🧠 MedCopilot V3 — Hybrid Hospital AI",
-    layout="wide",
-    page_icon="🧠"
+    page_title="MedCopilot V3 — Hybrid Hospital AI",
+    page_icon="🧠",
+    layout="wide"
 )
 
-st.title("🧠 MedCopilot V3 — Hybrid Hospital AI")
-st.caption("Evidence-based Hospital AI + Global Medical Research")
-st.warning("⚠ Research support only. Not a substitute for professional medical advice.")
+# ---------------- UI Header ----------------
+st.markdown("""
+# 🧠 MedCopilot V3 — Hybrid Hospital AI  
+### Evidence-Based Hospital AI + Global Medical Research  
+⚠ Research support only. Not a substitute for medical advice.
+""")
 
-# --------------------------------
-# Load Models (Cached)
-# --------------------------------
+# ---------------- Load Embedding Model ----------------
 @st.cache_resource
-def load_models():
-    embedder = SentenceTransformer("sentence-transformers/paraphrase-MiniLM-L3-v2")
-    llm = pipeline(
-        "text2text-generation",
-        model="google/flan-t5-base",
-        max_length=512
-    )
-    return embedder, llm
+def load_embedder():
+    return SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
 
-embedder, llm = load_models()
+embedder = load_embedder()
 
-# --------------------------------
-# External Medical AI (Groq)
-# --------------------------------
-def external_medical_ai(question):
-    api_key = os.environ.get("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY", "")
+# ---------------- Auto Medical Library Loader ----------------
+documents = []
+metadata = []
 
-    if not api_key:
-        return "❌ GROQ_API_KEY not found. Please add it in Streamlit Secrets."
+LIBRARY_PATH = "medical_library"
 
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
-
-    payload = {
-        "model": "llama-3.1-70b-versatile",
-        "messages": [
-            {"role": "system", "content": "You are a medical research assistant."},
-            {"role": "user", "content": question}
-        ],
-        "temperature": 0.3
-    }
-
-    try:
-        response = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=60
-        )
-        data = response.json()
-        return data["choices"][0]["message"]["content"]
-
-    except Exception as e:
-        return f"❌ External AI Error: {str(e)}"
-
-# --------------------------------
-# Auto Medical Library Loader
-# --------------------------------
-def load_medical_library(folder="medical_library"):
-    documents = []
-    metadata = []
-
-    if not os.path.exists(folder):
-        return [], []
-
-    for file in os.listdir(folder):
+if os.path.exists(LIBRARY_PATH):
+    for file in os.listdir(LIBRARY_PATH):
         if file.endswith(".pdf"):
-            pdf_path = os.path.join(folder, file)
+            pdf_path = os.path.join(LIBRARY_PATH, file)
             reader = PdfReader(pdf_path)
 
             for page_no, page in enumerate(reader.pages):
                 text = page.extract_text()
-                if text and len(text) > 200:
+                if text and len(text) > 300:
                     documents.append(text)
                     metadata.append(f"{file} - Page {page_no+1}")
 
-    return documents, metadata
+# ---------------- Build FAISS Index ----------------
+index = None
 
-
-@st.cache_resource
-def build_medical_db():
-    docs, meta = load_medical_library("medical_library")
-
-    if len(docs) == 0:
-        return None, None, None
-
-    embeddings = embedder.encode(docs)
+if documents:
+    embeddings = embedder.encode(documents, show_progress_bar=False)
     dim = embeddings.shape[1]
-
     index = faiss.IndexFlatL2(dim)
     index.add(np.array(embeddings))
 
-    return index, docs, meta
-
-
-index, documents, metadata = build_medical_db()
-
-# --------------------------------
-# Sidebar Status
-# --------------------------------
-st.sidebar.title("🏥 MedCopilot Status")
+# ---------------- Sidebar ----------------
+st.sidebar.title("📚 MedCopilot Status")
 
 if documents:
-    st.sidebar.success(f"📚 Medical Library Loaded\n{len(documents)} pages indexed")
+    st.sidebar.success("Hospital Medical Library Loaded")
+    st.sidebar.write(f"Total Pages Indexed: {len(documents)}")
 else:
-    st.sidebar.warning("⚠ No Medical Library Found\nExternal AI Mode Enabled")
+    st.sidebar.warning("No Medical Library Found")
+    st.sidebar.info("External AI Mode Enabled")
 
-# --------------------------------
-# Clinical Workspace
-# --------------------------------
+# ---------------- Clinical Workspace ----------------
 st.markdown("## 🔬 Clinical Research Workspace")
 query = st.text_input("Ask a clinical research question:")
 
-# --------------------------------
-# Hybrid AI Engine
-# --------------------------------
+# ---------------- Answer Engine ----------------
 if query:
 
-    # -------- Evidence-Based Hospital Mode --------
-    if documents:
-        q_emb = embedder.encode([query])
-        D, I = index.search(np.array(q_emb), k=5)
+    # -------- Case 1: Hospital Evidence Mode --------
+    if documents and index:
+
+        query_embedding = embedder.encode([query])
+        D, I = index.search(np.array(query_embedding), k=5)
 
         retrieved_docs = [documents[i] for i in I[0]]
         retrieved_sources = [metadata[i] for i in I[0]]
@@ -150,7 +83,7 @@ if query:
         context = "\n\n".join(retrieved_docs[:2])
 
         prompt = f"""
-You are a hospital-grade medical research AI.
+You are a hospital-grade clinical research AI.
 Answer strictly from medical evidence.
 
 Context:
@@ -163,10 +96,10 @@ Provide professional clinical explanation.
 """
 
         with st.spinner("🧠 Analyzing hospital medical library..."):
-            answer = llm(prompt)[0]["generated_text"]
+            external = external_research_answer(prompt)
 
-        st.markdown("## 🩺 Evidence-Based Clinical Report")
-        st.write(answer)
+        st.markdown("## 🩺 Clinical Intelligence Report")
+        st.write(external["answer"])
 
         st.markdown("### 📚 Evidence Sources")
         for src in retrieved_sources:
@@ -174,18 +107,17 @@ Provide professional clinical explanation.
 
         st.success("Mode: Hospital Evidence AI")
 
-    # -------- Global Medical AI Mode --------
+    # -------- Case 2: External Global AI Mode --------
     else:
         with st.spinner("🌍 Searching global medical research..."):
-            answer = external_medical_ai(query)
+            external = external_research_answer(query)
 
         st.markdown("## 🌍 Global Medical Research Answer")
-        st.write(answer)
+        st.write(external["answer"])
 
         st.warning("Mode: External Medical AI (Research Mode)")
+        st.info("Upload PDFs into medical_library folder for hospital-grade evidence mode.")
 
-# --------------------------------
-# Footer
-# --------------------------------
+# ---------------- Footer ----------------
 st.markdown("---")
 st.caption("🧠 MedCopilot V3 — Clinical Intelligence Platform for Evidence-Based Medicine")
