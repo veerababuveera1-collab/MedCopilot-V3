@@ -5,9 +5,16 @@
 # ============================================================
 
 import streamlit as st
-import requests, os, json, math
+import requests, os, json
 import numpy as np
-from dotenv import load_dotenv
+
+# Safe dotenv import
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except:
+    pass
+
 from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
 import faiss
@@ -17,10 +24,15 @@ import faiss
 # ============================================================
 
 st.set_page_config("Clinical Research Copilot (AV)", layout="wide")
-load_dotenv()
 
 GROK_API_KEY = os.getenv("GROK_API_KEY")
 SEARCH_API_KEY = os.getenv("SEARCH_API_KEY")
+
+if not GROK_API_KEY:
+    st.error("❌ Missing GROK_API_KEY in environment variables")
+
+if not SEARCH_API_KEY:
+    st.error("❌ Missing SEARCH_API_KEY in environment variables")
 
 EMBED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
 
@@ -56,8 +68,36 @@ def search_web(query):
         "search_depth": "advanced",
         "max_results": 10
     }
-    r = requests.post(url, json=payload, timeout=30)
-    return r.json()["results"]
+
+    try:
+        r = requests.post(url, json=payload, timeout=30)
+
+        if r.status_code != 200:
+            st.error("Search API failed. Check SEARCH_API_KEY.")
+            return []
+
+        data = r.json()
+
+        # Handle multiple API formats safely
+        if "results" in data:
+            return data["results"]
+
+        if "data" in data:
+            return data["data"]
+
+        if "sources" in data:
+            return data["sources"]
+
+        # Fallback safe format
+        return [{
+            "title": "Search Result",
+            "url": "",
+            "content": data.get("answer", "No content returned")
+        }]
+
+    except Exception as e:
+        st.error(f"Search API error: {e}")
+        return []
 
 def call_grok(prompt):
     url = "https://api.x.ai/v1/chat/completions"
@@ -75,8 +115,16 @@ def call_grok(prompt):
         "temperature": 0.2
     }
 
-    r = requests.post(url, headers=headers, json=payload, timeout=60)
-    return r.json()["choices"][0]["message"]["content"]
+    try:
+        r = requests.post(url, headers=headers, json=payload, timeout=60)
+
+        if r.status_code != 200:
+            return "❌ Grok API failed. Check GROK_API_KEY."
+
+        return r.json()["choices"][0]["message"]["content"]
+
+    except Exception as e:
+        return f"❌ Grok API error: {e}"
 
 # ============================================================
 # Evidence Processing
@@ -84,7 +132,7 @@ def call_grok(prompt):
 
 def extract_pdf_text(pdf):
     reader = PdfReader(pdf)
-    return " ".join([p.extract_text() for p in reader.pages])
+    return " ".join([p.extract_text() for p in reader.pages if p.extract_text()])
 
 def embed_chunks(text, chunk_size=500):
     chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
@@ -101,7 +149,11 @@ def build_faiss(vectors):
 # ============================================================
 
 def detect_contradictions(studies):
-    risks = [s for s in studies if "risk" in s["content"].lower() or "adverse" in s["content"].lower()]
+    risks = []
+    for s in studies:
+        text = str(s).lower()
+        if "risk" in text or "adverse" in text or "warning" in text:
+            risks.append(s)
     return len(risks)
 
 def guideline_alignment(answer, guideline_text):
@@ -126,11 +178,21 @@ if run and query:
     st.info("🔍 Searching clinical evidence...")
     studies = search_web(query)
 
-    evidence_text = " ".join([s["content"] for s in studies])
+    if not studies:
+        st.warning("No web evidence found. Please try another query.")
+
+    evidence_text = " ".join([
+        str(s.get("content") or s.get("text") or s.get("snippet") or s)
+        for s in studies
+    ])
 
     if pdf_file:
         pdf_text = extract_pdf_text(pdf_file)
-        evidence_text += pdf_text
+        evidence_text += " " + pdf_text
+
+    if not evidence_text.strip():
+        st.error("No evidence available to analyze.")
+        st.stop()
 
     chunks, vectors = embed_chunks(evidence_text)
     index = build_faiss(vectors)
@@ -169,8 +231,11 @@ if run and query:
 
     ga = 0.0
     if guideline_url:
-        guide_text = requests.get(guideline_url, timeout=20).text[:5000]
-        ga = guideline_alignment(answer, guide_text)
+        try:
+            guide_text = requests.get(guideline_url, timeout=20).text[:5000]
+            ga = guideline_alignment(answer, guide_text)
+        except:
+            st.warning("Could not load guideline URL.")
 
     crts = compute_crts(sf, crr, ar, ga)
 
@@ -199,7 +264,9 @@ if run and query:
 
     with st.expander("🔎 View Evidence Sources"):
         for s in studies:
-            st.markdown(f"**{s['title']}**")
-            st.write(s["url"])
-            st.write(s["content"][:500])
+            st.markdown(f"**{s.get('title', 'Source')}**")
+            if "url" in s:
+                st.write(s["url"])
+            content = s.get("content") or s.get("text") or s.get("snippet") or str(s)
+            st.write(content[:500])
             st.divider()
