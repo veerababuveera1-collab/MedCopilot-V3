@@ -1,149 +1,146 @@
+# ============================================================
+# AI Research Assistant - Streamlit App (xAI Grok Backend)
+# Author: Veera Babu
+# ============================================================
+
+import os
+import tempfile
 import streamlit as st
-import faiss
-import numpy as np
-import requests
-from pypdf import PdfReader
-from sentence_transformers import SentenceTransformer
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.vectorstores import FAISS
+from langchain.embeddings.openai import OpenAIEmbeddings
+from langchain.llms import OpenAI
+from langchain.document_loaders import PyPDFLoader
+from langchain.chains import RetrievalQA
 
-# ===============================
-# CONFIG
-# ===============================
-GROK_API_KEY = "YOUR_GROK_API_KEY"
-GROK_MODEL = "grok-2-latest"
-EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+# ============================================================
+# Page Config
+# ============================================================
 
-# ===============================
-# PAGE CONFIG
-# ===============================
-st.set_page_config("NETRA-RESEARCH AI", layout="wide")
+st.set_page_config(
+    page_title="AI Research Assistant",
+    page_icon="🧠",
+    layout="wide"
+)
 
-st.title("🧠 NETRA-RESEARCH AI™")
-st.subheader("World-Class AI Research Assistant (Powered by Grok)")
+st.title("🧠 AI Research Assistant")
+st.caption("Powered by Grok (xAI) + LangChain + FAISS")
 
-# ===============================
-# LOAD EMBEDDING MODEL
-# ===============================
-@st.cache_resource
-def load_embedding_model():
-    return SentenceTransformer(EMBEDDING_MODEL)
+# ============================================================
+# Load API Key from secrets.toml
+# ============================================================
 
-embed_model = load_embedding_model()
+xai_key = st.secrets["XAI_API_KEY"]
+os.environ["XAI_API_KEY"] = xai_key
 
-# ===============================
-# VECTOR DATABASE
-# ===============================
-class VectorStore:
-    def __init__(self):
-        self.index = faiss.IndexFlatL2(384)
-        self.texts = []
+# ============================================================
+# Initialize LLM (xAI Grok)
+# ============================================================
 
-    def add_texts(self, texts):
-        embeddings = embed_model.encode(texts)
-        self.index.add(np.array(embeddings).astype("float32"))
-        self.texts.extend(texts)
+llm = OpenAI(
+    model_name="grok-2",
+    temperature=0.2,
+    openai_api_base="https://api.x.ai/v1",
+    openai_api_key=os.getenv("XAI_API_KEY")
+)
 
-    def search(self, query, k=5):
-        query_emb = embed_model.encode([query])
-        D, I = self.index.search(np.array(query_emb).astype("float32"), k)
-        return [self.texts[i] for i in I[0]]
+# ============================================================
+# Initialize Embeddings + Vector DB
+# ============================================================
 
-# ===============================
-# PDF LOADER
-# ===============================
-def load_pdf_text(uploaded_file):
-    reader = PdfReader(uploaded_file)
-    text = ""
-    for page in reader.pages:
-        page_text = page.extract_text()
-        if page_text:
-            text += page_text + "\n"
-    return text
+embeddings = OpenAIEmbeddings(
+    openai_api_base="https://api.x.ai/v1",
+    openai_api_key=os.getenv("XAI_API_KEY")
+)
 
-# ===============================
-# GROK AI ENGINE
-# ===============================
-def research_answer(query, context=""):
-    url = "https://api.x.ai/v1/chat/completions"
+DB_PATH = "faiss_db"
 
-    headers = {
-        "Authorization": f"Bearer {GROK_API_KEY}",
-        "Content-Type": "application/json"
-    }
+if os.path.exists(DB_PATH):
+    vector_db = FAISS.load_local(DB_PATH, embeddings)
+else:
+    vector_db = FAISS.from_texts(["AI Research Assistant Initialized"], embeddings)
+    vector_db.save_local(DB_PATH)
 
-    prompt = f"""
-You are NETRA-RESEARCH AI — a world-class research intelligence system.
+qa_chain = RetrievalQA.from_chain_type(
+    llm=llm,
+    retriever=vector_db.as_retriever(),
+    chain_type="stuff"
+)
 
-Context:
-{context}
+# ============================================================
+# UI Layout
+# ============================================================
 
-User Question:
-{query}
+col1, col2 = st.columns(2)
 
-Provide a detailed, professional research-grade answer.
-"""
+# ------------------------------
+# Research Query Section
+# ------------------------------
 
-    payload = {
-        "model": GROK_MODEL,
-        "messages": [
-            {"role": "system", "content": "You are a world-class research AI"},
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": 0.3
-    }
+with col1:
+    st.subheader("🔍 Research Query")
+    query = st.text_area("Enter your research question:")
 
-    response = requests.post(url, headers=headers, json=payload, timeout=60)
-
-    if response.status_code != 200:
-        return f"❌ API Error: {response.text}"
-
-    return response.json()["choices"][0]["message"]["content"]
-
-# ===============================
-# INIT VECTOR DB
-# ===============================
-if "vector_db" not in st.session_state:
-    st.session_state.vector_db = VectorStore()
-
-vector_db = st.session_state.vector_db
-
-# ===============================
-# SIDEBAR
-# ===============================
-st.sidebar.title("🔬 Research Tools")
-mode = st.sidebar.selectbox("Select Mode", ["AI Chat", "PDF Research"])
-
-# ===============================
-# PDF UPLOAD MODE
-# ===============================
-if mode == "PDF Research":
-    uploaded_file = st.file_uploader("Upload Research PDF", type=["pdf"])
-    if uploaded_file:
-        with st.spinner("Indexing document..."):
-            text = load_pdf_text(uploaded_file)
-            chunks = [text[i:i+500] for i in range(0, len(text), 500)]
-            vector_db.add_texts(chunks)
-        st.sidebar.success("📄 Document indexed successfully!")
-
-# ===============================
-# QUERY INPUT
-# ===============================
-query = st.text_input("Enter your research question")
-
-# ===============================
-# RESEARCH BUTTON
-# ===============================
-if st.button("🔍 Research"):
-    if not query.strip():
-        st.warning("Please enter a research question.")
-    else:
-        if mode == "PDF Research" and len(vector_db.texts) > 0:
-            docs = vector_db.search(query)
-            context = "\n".join(docs)
+    if st.button("Run AI Research"):
+        if query.strip() == "":
+            st.warning("Please enter a research question.")
         else:
-            context = ""
+            with st.spinner("Grok AI is analyzing..."):
+                answer = qa_chain.run(query)
 
-        with st.spinner("NETRA AI is thinking with Grok..."):
-            answer = research_answer(query, context)
+            st.success("Research Completed")
+            st.text_area("📄 AI Research Output:", answer, height=300)
 
-        st.markdown("### 📌 Research Output")
-        st.write(answer)
+# ------------------------------
+# PDF Upload Section
+# ------------------------------
+
+with col2:
+    st.subheader("📄 Upload Research PDF")
+    uploaded_file = st.file_uploader("Upload PDF", type=["pdf"])
+
+    if uploaded_file:
+        with st.spinner("Indexing PDF into AI memory..."):
+
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                tmp.write(uploaded_file.read())
+                tmp_path = tmp.name
+
+            loader = PyPDFLoader(tmp_path)
+            docs = loader.load()
+
+            splitter = RecursiveCharacterTextSplitter(
+                chunk_size=1000,
+                chunk_overlap=200
+            )
+            chunks = splitter.split_documents(docs)
+
+            vector_db.add_documents(chunks)
+            vector_db.save_local(DB_PATH)
+
+            st.success(f"PDF indexed successfully! Pages processed: {len(chunks)}")
+
+# ============================================================
+# Ask from PDF Knowledge Base
+# ============================================================
+
+st.divider()
+st.subheader("🧠 Ask from PDF Knowledge Base")
+
+kb_query = st.text_input("Ask a question from uploaded PDFs:")
+
+if st.button("Ask AI"):
+    if kb_query.strip() == "":
+        st.warning("Enter a question.")
+    else:
+        with st.spinner("Searching knowledge base..."):
+            kb_answer = qa_chain.run(kb_query)
+
+        st.text_area("📘 Knowledge Base Answer:", kb_answer, height=250)
+
+# ============================================================
+# Footer
+# ============================================================
+
+st.markdown("---")
+st.caption("🚀 AI Research Assistant | Grok + LangChain + FAISS | Built by Veera Babu")
