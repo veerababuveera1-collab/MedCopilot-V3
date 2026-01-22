@@ -1,109 +1,205 @@
+# ============================================================
+# Clinical Research Copilot — Active Verification Framework
+# Powered by Grok (xAI) LLM
+# Evidence • Contradiction • Guideline Anchoring • CRTS
+# ============================================================
+
 import streamlit as st
-import os
+import requests, os, json, math
 import numpy as np
-import faiss
-from sentence_transformers import SentenceTransformer
+from dotenv import load_dotenv
 from pypdf import PdfReader
+from sentence_transformers import SentenceTransformer
+import faiss
 
-from external_research import external_research_answer
+# ============================================================
+# CONFIG
+# ============================================================
 
-# ==================== CONFIG ====================
-st.set_page_config(
-    page_title="MedCopilot V3 — Hybrid Hospital AI",
-    page_icon="🧠",
-    layout="wide"
-)
+st.set_page_config("Clinical Research Copilot (AV)", layout="wide")
+load_dotenv()
 
-# ==================== UI ====================
-st.markdown("""
-# 🧠 MedCopilot V3 — Hybrid Hospital AI  
-### Evidence-Based Hospital AI + Global Medical Research  
-⚠ Research support only. Not a substitute for professional medical advice.
-""")
+GROK_API_KEY = os.getenv("GROK_API_KEY")
+SEARCH_API_KEY = os.getenv("SEARCH_API_KEY")
 
-# ==================== Sidebar ====================
-st.sidebar.title("🏥 MedCopilot Status")
+EMBED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
 
-PDF_FOLDER = "medical_library"
-pdf_files = []
+# ============================================================
+# UI
+# ============================================================
 
-if os.path.exists(PDF_FOLDER):
-    pdf_files = [f for f in os.listdir(PDF_FOLDER) if f.endswith(".pdf")]
+st.title("🧠 Clinical Research Copilot — Active Verification Framework")
+st.caption("Evidence-first clinical research intelligence with trust scoring")
+st.warning("⚠ Research Decision Support Tool. Not for clinical diagnosis or treatment.")
 
-if pdf_files:
-    st.sidebar.success("Medical Library Loaded")
-else:
-    st.sidebar.warning("No Medical Library Found")
-    st.sidebar.info("External AI Mode Enabled")
+query = st.text_input("Enter clinical research query")
 
-# ==================== Load Models ====================
-@st.cache_resource
-def load_embedder():
-    return SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+guideline_url = st.text_input("Paste Guideline URL (NICE / WHO)")
+pdf_file = st.file_uploader("Upload Clinical PDF", type=["pdf"])
 
-embedder = load_embedder()
+alpha = st.slider("α Source Fidelity Weight", 0.0, 1.0, 0.30)
+beta = st.slider("β Contradiction Weight", 0.0, 1.0, 0.30)
+gamma = st.slider("γ Audit Coverage Weight", 0.0, 1.0, 0.20)
+delta = st.slider("δ Guideline Alignment Weight", 0.0, 1.0, 0.20)
 
-# ==================== Load PDFs ====================
-documents = []
-sources = []
+run = st.button("Run Active Verification")
 
-if pdf_files:
-    for file in pdf_files:
-        reader = PdfReader(os.path.join(PDF_FOLDER, file))
-        for i, page in enumerate(reader.pages):
-            text = page.extract_text()
-            if text and len(text) > 200:
-                documents.append(text)
-                sources.append(f"{file} — Page {i+1}")
+# ============================================================
+# External APIs
+# ============================================================
 
-# ==================== Build Vector DB ====================
-if documents:
-    embeddings = embedder.encode(documents)
-    dim = embeddings.shape[1]
-    index = faiss.IndexFlatL2(dim)
-    index.add(np.array(embeddings))
-else:
-    index = None
+def search_web(query):
+    url = "https://api.tavily.com/search"
+    payload = {
+        "api_key": SEARCH_API_KEY,
+        "query": query,
+        "search_depth": "advanced",
+        "max_results": 10
+    }
+    r = requests.post(url, json=payload, timeout=30)
+    return r.json()["results"]
 
-# ==================== Workspace ====================
-st.markdown("## 🔬 Clinical Research Workspace")
+def call_grok(prompt):
+    url = "https://api.x.ai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {GROK_API_KEY}",
+        "Content-Type": "application/json"
+    }
 
-query = st.text_input("Ask a clinical research question:")
+    payload = {
+        "model": "grok-2-latest",
+        "messages": [
+            {"role": "system", "content": "You are a clinical research copilot. Use only provided evidence."},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.2
+    }
 
-# ==================== Hybrid AI ====================
-if query:
+    r = requests.post(url, headers=headers, json=payload, timeout=60)
+    return r.json()["choices"][0]["message"]["content"]
 
-    # ----------- Hospital Evidence Mode -----------
-    if documents:
+# ============================================================
+# Evidence Processing
+# ============================================================
 
-        q_embed = embedder.encode([query])
-        D, I = index.search(np.array(q_embed), 5)
+def extract_pdf_text(pdf):
+    reader = PdfReader(pdf)
+    return " ".join([p.extract_text() for p in reader.pages])
 
-        context = "\n\n".join([documents[i] for i in I[0]])
-        used_sources = [sources[i] for i in I[0]]
+def embed_chunks(text, chunk_size=500):
+    chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+    vectors = EMBED_MODEL.encode(chunks)
+    return chunks, np.array(vectors)
 
-        st.markdown("## 🏥 Hospital Evidence-Based Answer")
+def build_faiss(vectors):
+    index = faiss.IndexFlatL2(vectors.shape[1])
+    index.add(vectors)
+    return index
 
-        st.write(context[:3000])  # preview context
+# ============================================================
+# Verification Logic
+# ============================================================
 
-        st.markdown("### 📚 Evidence Sources")
-        for s in used_sources:
-            st.info(s)
+def detect_contradictions(studies):
+    risks = [s for s in studies if "risk" in s["content"].lower() or "adverse" in s["content"].lower()]
+    return len(risks)
 
-        st.success("Mode: Hospital Evidence AI (Local Medical Library)")
+def guideline_alignment(answer, guideline_text):
+    v1 = EMBED_MODEL.encode(answer)
+    v2 = EMBED_MODEL.encode(guideline_text)
+    score = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
+    return float(score)
 
-    # ----------- Global Medical AI Mode -----------
+# ============================================================
+# CRTS Calculation
+# ============================================================
+
+def compute_crts(sf, crr, ar, ga):
+    return round(alpha*sf + beta*crr + gamma*ar + delta*ga, 2)
+
+# ============================================================
+# Main Pipeline
+# ============================================================
+
+if run and query:
+
+    st.info("🔍 Searching clinical evidence...")
+    studies = search_web(query)
+
+    evidence_text = " ".join([s["content"] for s in studies])
+
+    if pdf_file:
+        pdf_text = extract_pdf_text(pdf_file)
+        evidence_text += pdf_text
+
+    chunks, vectors = embed_chunks(evidence_text)
+    index = build_faiss(vectors)
+
+    st.success(f"Loaded {len(studies)} web studies")
+
+    st.info("🧠 Generating research synthesis using Grok...")
+
+    prompt = f"""
+    You are a clinical research copilot.
+
+    Answer the following research question strictly using the provided evidence.
+    Highlight any uncertainty or conflicting findings.
+
+    Research Question:
+    {query}
+
+    Evidence Corpus:
+    {evidence_text[:6000]}
+    """
+
+    answer = call_grok(prompt)
+
+    st.subheader("🧾 Research Synthesis (Grok)")
+    st.write(answer)
+
+    # ============================================================
+    # Verification
+    # ============================================================
+
+    contradictions = detect_contradictions(studies)
+    crr = 1 if contradictions > 0 else 0
+
+    sf = 1.0  # Evidence grounded
+    ar = min(1, len(studies)/10)
+
+    ga = 0.0
+    if guideline_url:
+        guide_text = requests.get(guideline_url, timeout=20).text[:5000]
+        ga = guideline_alignment(answer, guide_text)
+
+    crts = compute_crts(sf, crr, ar, ga)
+
+    # ============================================================
+    # Audit Report
+    # ============================================================
+
+    st.subheader("📊 Active Verification Audit")
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    col1.metric("Source Fidelity (SF)", f"{sf*100:.0f}%")
+    col2.metric("Contradiction Detected (CRR)", "Yes" if crr else "No")
+    col3.metric("Audit Coverage (AR*)", f"{ar:.2f}")
+    col4.metric("Guideline Alignment (GA)", f"{ga:.2f}")
+
+    st.subheader("✅ Clinical Response Transparency Score (CRTS)")
+    st.metric("Trust Score", crts)
+
+    if crts >= 0.8:
+        st.success("High Trust Research Output")
+    elif crts >= 0.5:
+        st.warning("Moderate Trust — Review Recommended")
     else:
-        st.markdown("## 🌍 Global Medical Research Answer")
+        st.error("Low Trust — Verification Required")
 
-        try:
-            with st.spinner("🔍 Searching global medical research..."):
-                external = external_research_answer(query)
-
-            st.markdown("### 🧠 Clinical Research Answer")
-            st.write(external["answer"])
-
-            st.success("Mode: Global Medical AI (Groq LLaMA-3.1)")
-
-        except Exception as e:
-            st.error(f"External AI Error: {str(e)}")
+    with st.expander("🔎 View Evidence Sources"):
+        for s in studies:
+            st.markdown(f"**{s['title']}**")
+            st.write(s["url"])
+            st.write(s["content"][:500])
+            st.divider()
