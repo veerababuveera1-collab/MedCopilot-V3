@@ -1,5 +1,5 @@
 # ============================================================
-# Clinical Research AI Copilot – Rate Limit Proof RAG App
+# Clinical Research AI Copilot – Zero Error Stable RAG App
 # Author: Veera Babu
 # ============================================================
 
@@ -34,6 +34,7 @@ st.set_page_config(page_title="Clinical Research AI Copilot", layout="wide")
 
 MODEL_NAME = "gpt-4o-mini"
 VECTOR_PATH = "vector_store"
+
 Entrez.email = "your_email@example.com"
 
 # ---------------- AI ----------------
@@ -47,23 +48,39 @@ embeddings = OpenAIEmbeddings(
 # ---------------- INGEST ----------------
 
 def fetch_arxiv(q, n):
-    return [
-        Document(f"{r.title}\n{r.summary}", {"title": r.title, "source": r.entry_id})
-        for r in arxiv.Search(query=q, max_results=n).results()
-    ]
+    docs = []
+    for r in arxiv.Search(query=q, max_results=n).results():
+        docs.append(
+            Document(
+                page_content=f"{r.title}\n{r.summary}",
+                metadata={"title": r.title, "source": r.entry_id}
+            )
+        )
+    return docs
+
 
 def fetch_pubmed(q, n):
     ids = Entrez.read(Entrez.esearch(db="pubmed", term=q, retmax=n))["IdList"]
     docs = []
+
     for pid in ids:
         rec = Entrez.read(Entrez.efetch(db="pubmed", id=pid, retmode="xml"))
         art = rec["PubmedArticle"][0]["MedlineCitation"]["Article"]
+
         if "Abstract" not in art:
             continue
+
         title = art["ArticleTitle"]
         abstract = " ".join(art["Abstract"]["AbstractText"])
-        docs.append(Document(f"{title}\n{abstract}", {"title": title, "source": f"PubMed:{pid}"}))
+
+        docs.append(
+            Document(
+                page_content=f"{title}\n{abstract}",
+                metadata={"title": title, "source": f"PubMed:{pid}"}
+            )
+        )
     return docs
+
 
 def load_pdfs(files):
     docs = []
@@ -77,22 +94,22 @@ def load_pdfs(files):
 
 def embed_safely(chunks):
     db = None
-    batch_size = 8   # very safe for free tier
+    batch_size = 8
 
     for i in range(0, len(chunks), batch_size):
-        batch = chunks[i:i+batch_size]
+        batch = chunks[i:i + batch_size]
 
         if db is None:
             db = FAISS.from_documents(batch, embeddings)
         else:
             db.add_documents(batch)
 
-        time.sleep(3)   # cooldown
+        time.sleep(2)
 
     return db
 
 
-def build_or_load_vector_db(docs):
+def build_or_load_vector_db(docs: List[Document]):
     if os.path.exists(VECTOR_PATH):
         return FAISS.load_local(VECTOR_PATH, embeddings)
 
@@ -120,11 +137,11 @@ Context:
 Question:
 {question}
 
-Answer with summary + key findings + citations.
+Answer with summary, key findings, and citations.
 """)
 
 def build_chain(db):
-    retriever = db.as_retriever(k=4)
+    retriever = db.as_retriever(search_kwargs={"k": 4})
 
     def join(docs):
         return "\n\n".join(d.page_content for d in docs)
@@ -142,18 +159,20 @@ st.title("🏥 Clinical Research AI Copilot")
 
 with st.sidebar:
     topic = st.text_input("Search topic", "glioblastoma treatment")
-    arxiv_n = st.slider("ArXiv", 1, 3, 1)
-    pubmed_n = st.slider("PubMed", 1, 3, 1)
+    arxiv_n = st.slider("ArXiv papers", 1, 3, 1)
+    pubmed_n = st.slider("PubMed articles", 1, 3, 1)
     pdfs = st.file_uploader("Upload PDFs", type="pdf", accept_multiple_files=True)
 
     if st.button("Build Knowledge Base"):
-        docs = fetch_arxiv(topic, arxiv_n) + fetch_pubmed(topic, pubmed_n) + load_pdfs(pdfs)
+        docs = fetch_arxiv(topic, arxiv_n)
+        docs += fetch_pubmed(topic, pubmed_n)
+        docs += load_pdfs(pdfs)
 
         if not docs:
-            st.warning("No documents")
+            st.warning("No documents loaded")
             st.stop()
 
-        with st.spinner("Building safe vector database..."):
+        with st.spinner("Building knowledge base..."):
             st.session_state.db = build_or_load_vector_db(docs)
 
         st.success("Knowledge base ready!")
@@ -169,4 +188,4 @@ if question and st.session_state.db:
     chain = build_chain(st.session_state.db)
     st.write(chain.invoke(question))
 
-st.caption("Research only")
+st.caption("Research use only")
