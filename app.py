@@ -8,6 +8,7 @@ import shutil
 import tempfile
 import streamlit as st
 from typing import List
+import requests
 
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -21,6 +22,29 @@ from langchain_community.llms import Ollama
 from Bio import Entrez
 import arxiv
 
+# ---------------- OLLAMA AUTO CHECK ----------------
+
+def check_ollama():
+    try:
+        return requests.get("http://localhost:11434/api/tags", timeout=2).status_code == 200
+    except:
+        return False
+
+
+if not check_ollama():
+    st.error("""
+🦙 Ollama is not running!
+
+Start it first:
+
+👉 ollama serve  
+or  
+👉 ollama run llama3
+
+Then refresh this page.
+""")
+    st.stop()
+
 # ---------------- CONFIG ----------------
 
 st.set_page_config(page_title="Clinical Research AI Copilot (Free)", layout="wide")
@@ -30,7 +54,7 @@ Entrez.email = "your_email@example.com"
 
 # ---------------- FREE MODELS ----------------
 
-llm = Ollama(model="llama3")   # or mistral
+llm = Ollama(model="llama3")
 
 embeddings = HuggingFaceEmbeddings(
     model_name="sentence-transformers/all-MiniLM-L6-v2"
@@ -87,7 +111,7 @@ def build_or_load_db(docs: List[Document]):
     try:
         if os.path.exists(VECTOR_PATH):
             return FAISS.load_local(VECTOR_PATH, embeddings)
-    except Exception:
+    except:
         shutil.rmtree(VECTOR_PATH, ignore_errors=True)
 
     splitter = RecursiveCharacterTextSplitter(
@@ -112,14 +136,14 @@ Context:
 Question:
 {question}
 
-Answer with:
-• Summary
+Provide:
+• Clear summary
 • Key insights
-• Evidence
+• Evidence based answer
 """)
 
 def build_chain(db):
-    retriever = db.as_retriever(k=4)
+    retriever = db.as_retriever(search_kwargs={"k": 4})
 
     def join(docs):
         return "\n\n".join(d.page_content for d in docs)
@@ -142,7 +166,8 @@ with st.sidebar:
     pdfs = st.file_uploader("Upload PDFs", type="pdf", accept_multiple_files=True)
 
     if st.button("Build Knowledge Base"):
-        docs = fetch_arxiv(topic, arxiv_n)
+        docs = []
+        docs += fetch_arxiv(topic, arxiv_n)
         docs += fetch_pubmed(topic, pubmed_n)
         docs += load_pdfs(pdfs)
 
@@ -166,4 +191,4 @@ if question and st.session_state.db:
     chain = build_chain(st.session_state.db)
     st.write(chain.invoke(question))
 
-st.caption("Runs 100% free — no API keys")
+st.caption("Runs fully free • Local AI • No API keys")
