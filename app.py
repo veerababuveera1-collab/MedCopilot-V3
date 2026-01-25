@@ -1,146 +1,208 @@
 # ============================================================
-# AI Research Assistant - Streamlit App (xAI Grok Backend)
+# 🏥 Clinical Research AI Copilot – FINAL APP
+# Research & education only – Not for diagnosis
 # Author: Veera Babu
 # ============================================================
 
 import os
-import tempfile
 import streamlit as st
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.vectorstores import FAISS
-from langchain.embeddings.openai import OpenAIEmbeddings
-from langchain.llms import OpenAI
-from langchain.document_loaders import PyPDFLoader
-from langchain.chains import RetrievalQA
+import tempfile
+from datetime import datetime
+from typing import List
 
-# ============================================================
-# Page Config
-# ============================================================
+from Bio import Entrez
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_core.documents import Document
 
-st.set_page_config(
-    page_title="AI Research Assistant",
-    page_icon="🧠",
-    layout="wide"
-)
+import pandas as pd
+import plotly.express as px
 
-st.title("🧠 AI Research Assistant")
-st.caption("Powered by Grok (xAI) + LangChain + FAISS")
+# ------------------ CONFIG ------------------
 
-# ============================================================
-# Load API Key from secrets.toml
-# ============================================================
+st.set_page_config("Clinical AI Copilot", layout="wide")
 
-xai_key = st.secrets["XAI_API_KEY"]
-os.environ["XAI_API_KEY"] = xai_key
+Entrez.email = "research@example.com"
 
-# ============================================================
-# Initialize LLM (xAI Grok)
-# ============================================================
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+embeddings = OpenAIEmbeddings()
 
-llm = OpenAI(
-    model_name="grok-2",
-    temperature=0.2,
-    openai_api_base="https://api.x.ai/v1",
-    openai_api_key=os.getenv("XAI_API_KEY")
-)
+if "vector_db" not in st.session_state:
+    st.session_state.vector_db = None
 
-# ============================================================
-# Initialize Embeddings + Vector DB
-# ============================================================
+LOG_FILE = "audit_log.csv"
 
-embeddings = OpenAIEmbeddings(
-    openai_api_base="https://api.x.ai/v1",
-    openai_api_key=os.getenv("XAI_API_KEY")
-)
+# ------------------ UTILITIES ------------------
 
-DB_PATH = "faiss_db"
-
-if os.path.exists(DB_PATH):
-    vector_db = FAISS.load_local(DB_PATH, embeddings)
-else:
-    vector_db = FAISS.from_texts(["AI Research Assistant Initialized"], embeddings)
-    vector_db.save_local(DB_PATH)
-
-qa_chain = RetrievalQA.from_chain_type(
-    llm=llm,
-    retriever=vector_db.as_retriever(),
-    chain_type="stuff"
-)
-
-# ============================================================
-# UI Layout
-# ============================================================
-
-col1, col2 = st.columns(2)
-
-# ------------------------------
-# Research Query Section
-# ------------------------------
-
-with col1:
-    st.subheader("🔍 Research Query")
-    query = st.text_area("Enter your research question:")
-
-    if st.button("Run AI Research"):
-        if query.strip() == "":
-            st.warning("Please enter a research question.")
-        else:
-            with st.spinner("Grok AI is analyzing..."):
-                answer = qa_chain.run(query)
-
-            st.success("Research Completed")
-            st.text_area("📄 AI Research Output:", answer, height=300)
-
-# ------------------------------
-# PDF Upload Section
-# ------------------------------
-
-with col2:
-    st.subheader("📄 Upload Research PDF")
-    uploaded_file = st.file_uploader("Upload PDF", type=["pdf"])
-
-    if uploaded_file:
-        with st.spinner("Indexing PDF into AI memory..."):
-
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                tmp.write(uploaded_file.read())
-                tmp_path = tmp.name
-
-            loader = PyPDFLoader(tmp_path)
-            docs = loader.load()
-
-            splitter = RecursiveCharacterTextSplitter(
-                chunk_size=1000,
-                chunk_overlap=200
-            )
-            chunks = splitter.split_documents(docs)
-
-            vector_db.add_documents(chunks)
-            vector_db.save_local(DB_PATH)
-
-            st.success(f"PDF indexed successfully! Pages processed: {len(chunks)}")
-
-# ============================================================
-# Ask from PDF Knowledge Base
-# ============================================================
-
-st.divider()
-st.subheader("🧠 Ask from PDF Knowledge Base")
-
-kb_query = st.text_input("Ask a question from uploaded PDFs:")
-
-if st.button("Ask AI"):
-    if kb_query.strip() == "":
-        st.warning("Enter a question.")
+def log_action(action, query):
+    row = {
+        "time": datetime.now(),
+        "action": action,
+        "query": query
+    }
+    df = pd.DataFrame([row])
+    if os.path.exists(LOG_FILE):
+        df.to_csv(LOG_FILE, mode="a", header=False, index=False)
     else:
-        with st.spinner("Searching knowledge base..."):
-            kb_answer = qa_chain.run(kb_query)
+        df.to_csv(LOG_FILE, index=False)
 
-        st.text_area("📘 Knowledge Base Answer:", kb_answer, height=250)
+def chunk_docs(texts: List[str]):
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
+    docs = []
+    for t in texts:
+        docs.extend(splitter.create_documents([t]))
+    return docs
 
-# ============================================================
-# Footer
-# ============================================================
+# ------------------ INGESTION ------------------
 
-st.markdown("---")
-st.caption("🚀 AI Research Assistant | Grok + LangChain + FAISS | Built by Veera Babu")
+def ingest_pubmed(query, limit=5):
+    handle = Entrez.esearch(db="pubmed", term=query, retmax=limit)
+    ids = Entrez.read(handle)["IdList"]
+
+    texts = []
+
+    for pid in ids:
+        fetch = Entrez.efetch(db="pubmed", id=pid, rettype="abstract", retmode="text")
+        texts.append(fetch.read())
+
+    return texts, ids
+
+def ingest_pdfs(files):
+    texts = []
+    for f in files:
+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
+            tmp.write(f.read())
+            loader = PyPDFLoader(tmp.name)
+            pages = loader.load()
+            for p in pages:
+                texts.append(p.page_content)
+    return texts
+
+# ------------------ VECTOR BUILD ------------------
+
+def build_index(texts):
+    docs = chunk_docs(texts)
+    return FAISS.from_documents(docs, embeddings)
+
+# ------------------ SEARCH ------------------
+
+def search_evidence(query):
+    db = st.session_state.vector_db
+    return db.similarity_search(query, k=5)
+
+# ------------------ AI TASKS ------------------
+
+def summarize_docs(docs):
+    content = "\n".join([d.page_content for d in docs])
+    prompt = f"Summarize key clinical findings:\n{content}"
+    return llm.invoke(prompt).content
+
+def compare_outcomes(docs):
+    content = "\n".join([d.page_content for d in docs])
+    prompt = f"Compare treatment outcomes (survival, response):\n{content}"
+    return llm.invoke(prompt).content
+
+def score_evidence(docs):
+    prompt = "Rate evidence strength from 1–5 based on methodology."
+    text = "\n".join([d.page_content for d in docs])
+    return llm.invoke(prompt + text).content
+
+# ------------------ UI ------------------
+
+st.title("🧠 Clinical Research AI Copilot")
+
+tabs = st.tabs([
+    "📥 Ingestion",
+    "🔍 Research",
+    "📊 Analytics",
+    "📁 Audit Log"
+])
+
+# =====================================================
+# INGESTION
+# =====================================================
+
+with tabs[0]:
+    st.subheader("Unstructured Literature Ingestion")
+
+    pub_query = st.text_input("Search PubMed")
+    pdfs = st.file_uploader("Upload PDFs", accept_multiple_files=True)
+
+    if st.button("Ingest Knowledge"):
+        texts = []
+
+        if pub_query:
+            pm_texts, pm_ids = ingest_pubmed(pub_query)
+            texts.extend(pm_texts)
+            st.success(f"Ingested {len(pm_ids)} PubMed articles")
+
+        if pdfs:
+            pdf_texts = ingest_pdfs(pdfs)
+            texts.extend(pdf_texts)
+            st.success(f"Ingested {len(pdfs)} PDFs")
+
+        if texts:
+            st.session_state.vector_db = build_index(texts)
+            st.success("Semantic Index Built!")
+
+# =====================================================
+# RESEARCH
+# =====================================================
+
+with tabs[1]:
+    st.subheader("Clinical Query Understanding")
+
+    query = st.text_input("Ask clinical research question")
+
+    if st.button("Search Evidence"):
+        log_action("SEARCH", query)
+
+        results = search_evidence(query)
+
+        st.markdown("### 🔎 Retrieved Evidence")
+        for i, r in enumerate(results):
+            st.write(f"**Doc {i+1}:**", r.page_content[:500])
+
+        if st.button("🧾 Summarize"):
+            st.markdown(summarize_docs(results))
+
+        if st.button("📈 Compare Outcomes"):
+            st.markdown(compare_outcomes(results))
+
+        if st.button("⭐ Evidence Strength"):
+            st.markdown(score_evidence(results))
+
+# =====================================================
+# ANALYTICS DASHBOARD
+# =====================================================
+
+with tabs[2]:
+    st.subheader("Real-Time Research Analytics")
+
+    if os.path.exists(LOG_FILE):
+        df = pd.read_csv(LOG_FILE)
+
+        fig = px.histogram(df, x="action", title="Query Activity")
+        st.plotly_chart(fig)
+
+        st.dataframe(df.tail(20))
+
+# =====================================================
+# AUDIT & COMPLIANCE
+# =====================================================
+
+with tabs[3]:
+    st.subheader("Audit Log")
+
+    if os.path.exists(LOG_FILE):
+        st.dataframe(pd.read_csv(LOG_FILE))
+    else:
+        st.info("No logs yet")
+
+# =====================================================
+# FOOTER
+# =====================================================
+
+st.caption("Clinical AI Copilot — Evidence-based research assistant")
