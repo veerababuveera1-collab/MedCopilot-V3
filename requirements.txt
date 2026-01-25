@@ -1,9 +1,4 @@
 streamlit
-langchain
-langchain-openai
-langchain-community
-faiss-cpu
-biopython
+requests
 pandas
-plotly
-pypdf
+groq
