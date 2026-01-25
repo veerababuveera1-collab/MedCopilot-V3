@@ -1,5 +1,5 @@
 # ============================================================
-# Clinical Research AI Copilot – Optimized Streamlit RAG App
+# Clinical Research AI Copilot – Fixed & Stable Streamlit RAG App
 # Author: Veera Babu
 # Research only | Not for diagnosis
 # ============================================================
@@ -30,7 +30,7 @@ load_dotenv()
 API_KEY = os.getenv("OPENAI_API_KEY")
 
 if not API_KEY:
-    st.error("❌ OPENAI_API_KEY not set. Add it in Streamlit Secrets or .env file.")
+    st.error("❌ OPENAI_API_KEY missing. Add in Streamlit secrets or .env")
     st.stop()
 
 # ------------------------------------------------
@@ -58,17 +58,17 @@ embeddings = OpenAIEmbeddings(
 )
 
 # ------------------------------------------------
-# INGESTION
+# INGESTION (SAFE)
 # ------------------------------------------------
 
 def fetch_arxiv(query, n):
-    return [
-        Document(
-            page_content=f"Title: {r.title}\nSummary: {r.summary}",
+    docs = []
+    for r in arxiv.Search(query=query, max_results=n).results():
+        docs.append(Document(
+            page_content=f"{r.title}\n{r.summary}",
             metadata={"title": r.title, "source": r.entry_id}
-        )
-        for r in arxiv.Search(query=query, max_results=n).results()
-    ]
+        ))
+    return docs
 
 
 def fetch_pubmed(query, n):
@@ -78,15 +78,21 @@ def fetch_pubmed(query, n):
 
     docs = []
     for pid in ids:
-        rec = Entrez.read(
+        record = Entrez.read(
             Entrez.efetch(db="pubmed", id=pid, retmode="xml")
         )
-        art = rec["PubmedArticle"][0]
-        title = art["MedlineCitation"]["Article"]["ArticleTitle"]
-        abstract = art["MedlineCitation"]["Article"]["Abstract"]["AbstractText"][0]
+
+        article = record["PubmedArticle"][0]
+        title = article["MedlineCitation"]["Article"]["ArticleTitle"]
+
+        abstract_block = article["MedlineCitation"]["Article"].get("Abstract")
+        if not abstract_block:
+            continue
+
+        abstract = " ".join(abstract_block["AbstractText"])
 
         docs.append(Document(
-            page_content=f"Title: {title}\nAbstract: {abstract}",
+            page_content=f"{title}\n{abstract}",
             metadata={"title": title, "source": f"PubMed:{pid}"}
         ))
     return docs
@@ -101,24 +107,28 @@ def load_pdfs(files):
     return docs
 
 # ------------------------------------------------
-# VECTOR DB (RATE SAFE)
+# VECTOR DB (CACHED + RATE SAFE)
 # ------------------------------------------------
 
-def build_vector_db(docs: List[Document]):
+@st.cache_resource(show_spinner=False)
+def build_vector_db_cached(docs: tuple):
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1600,
+        chunk_size=1500,
         chunk_overlap=100
     )
-    chunks = splitter.split_documents(docs)
+    chunks = splitter.split_documents(list(docs))
 
+    return FAISS.from_documents(chunks, embeddings)
+
+
+def build_vector_db(docs: List[Document]):
     for attempt in range(3):
         try:
-            return FAISS.from_documents(chunks, embeddings)
-        except Exception as e:
-            st.warning(f"⚠️ Rate limit hit. Retrying ({attempt+1}/3)...")
-            time.sleep(10)
+            return build_vector_db_cached(tuple(docs))
+        except Exception:
+            time.sleep(8)
 
-    st.error("❌ Failed after multiple retries. Try fewer documents.")
+    st.error("❌ OpenAI rate limit reached. Try fewer documents.")
     st.stop()
 
 # ------------------------------------------------
@@ -128,7 +138,7 @@ def build_vector_db(docs: List[Document]):
 PROMPT = ChatPromptTemplate.from_template("""
 You are a clinical research assistant.
 
-Use only the provided context.
+Use only the evidence below.
 
 Context:
 {context}
@@ -136,10 +146,10 @@ Context:
 Question:
 {question}
 
-Return:
+Answer with:
 • Summary
 • Key findings
-• Citations
+• Source titles
 """)
 
 def build_chain(db):
@@ -166,8 +176,8 @@ with st.sidebar:
 
     topic = st.text_input("Search topic", "glioblastoma treatment")
 
-    arxiv_n = st.slider("ArXiv papers", 1, 5, 2)
-    pubmed_n = st.slider("PubMed articles", 1, 5, 2)
+    arxiv_n = st.slider("ArXiv papers", 1, 4, 2)
+    pubmed_n = st.slider("PubMed articles", 1, 4, 2)
 
     pdfs = st.file_uploader("Upload PDFs", type="pdf", accept_multiple_files=True)
 
@@ -179,10 +189,10 @@ with st.sidebar:
             docs += load_pdfs(pdfs)
 
         if not docs:
-            st.warning("No documents loaded")
+            st.warning("No usable documents found.")
             st.stop()
 
-        with st.spinner("Creating AI index..."):
+        with st.spinner("Creating AI knowledge base..."):
             st.session_state.db = build_vector_db(docs)
 
         st.success(f"Indexed {len(docs)} documents!")
@@ -201,7 +211,7 @@ question = st.text_input("🔍 Ask research question")
 if question and st.session_state.db:
     chain = build_chain(st.session_state.db)
 
-    with st.spinner("Analyzing research..."):
+    with st.spinner("Analyzing evidence..."):
         answer = chain.invoke(question)
 
     st.subheader("📄 AI Answer")
