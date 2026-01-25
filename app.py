@@ -1,12 +1,11 @@
 # ============================================================
-# Clinical Research AI Copilot – Fixed & Stable Streamlit RAG App
+# Clinical Research AI Copilot – Persistent Vector RAG App
 # Author: Veera Babu
 # Research only | Not for diagnosis
 # ============================================================
 
 import os
 import tempfile
-import time
 import streamlit as st
 from typing import List
 from dotenv import load_dotenv
@@ -23,23 +22,21 @@ from Bio import Entrez
 import arxiv
 
 # ------------------------------------------------
-# LOAD API KEY
+# CONFIG
 # ------------------------------------------------
 
 load_dotenv()
 API_KEY = os.getenv("OPENAI_API_KEY")
 
 if not API_KEY:
-    st.error("❌ OPENAI_API_KEY missing. Add in Streamlit secrets or .env")
+    st.error("❌ OPENAI_API_KEY missing. Add it in secrets or .env")
     st.stop()
-
-# ------------------------------------------------
-# APP CONFIG
-# ------------------------------------------------
 
 st.set_page_config(page_title="Clinical Research AI Copilot", layout="wide")
 
 MODEL_NAME = "gpt-4o-mini"
+VECTOR_PATH = "vector_store"
+
 Entrez.email = "your_email@example.com"
 
 # ------------------------------------------------
@@ -58,7 +55,7 @@ embeddings = OpenAIEmbeddings(
 )
 
 # ------------------------------------------------
-# INGESTION (SAFE)
+# DATA INGESTION
 # ------------------------------------------------
 
 def fetch_arxiv(query, n):
@@ -78,14 +75,14 @@ def fetch_pubmed(query, n):
 
     docs = []
     for pid in ids:
-        record = Entrez.read(
+        rec = Entrez.read(
             Entrez.efetch(db="pubmed", id=pid, retmode="xml")
         )
 
-        article = record["PubmedArticle"][0]
-        title = article["MedlineCitation"]["Article"]["ArticleTitle"]
+        art = rec["PubmedArticle"][0]
+        title = art["MedlineCitation"]["Article"]["ArticleTitle"]
 
-        abstract_block = article["MedlineCitation"]["Article"].get("Abstract")
+        abstract_block = art["MedlineCitation"]["Article"].get("Abstract")
         if not abstract_block:
             continue
 
@@ -107,38 +104,32 @@ def load_pdfs(files):
     return docs
 
 # ------------------------------------------------
-# VECTOR DB (CACHED + RATE SAFE)
+# VECTOR STORE (PERSISTENT)
 # ------------------------------------------------
 
-@st.cache_resource(show_spinner=False)
-def build_vector_db_cached(docs: tuple):
+def build_or_load_vector_db(docs: List[Document]):
+    if os.path.exists(VECTOR_PATH):
+        return FAISS.load_local(VECTOR_PATH, embeddings)
+
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=1500,
         chunk_overlap=100
     )
-    chunks = splitter.split_documents(list(docs))
+    chunks = splitter.split_documents(docs)
 
-    return FAISS.from_documents(chunks, embeddings)
+    db = FAISS.from_documents(chunks, embeddings)
+    db.save_local(VECTOR_PATH)
 
-
-def build_vector_db(docs: List[Document]):
-    for attempt in range(3):
-        try:
-            return build_vector_db_cached(tuple(docs))
-        except Exception:
-            time.sleep(8)
-
-    st.error("❌ OpenAI rate limit reached. Try fewer documents.")
-    st.stop()
+    return db
 
 # ------------------------------------------------
-# RAG PIPELINE
+# RAG CHAIN
 # ------------------------------------------------
 
 PROMPT = ChatPromptTemplate.from_template("""
 You are a clinical research assistant.
 
-Use only the evidence below.
+Use only the evidence provided.
 
 Context:
 {context}
@@ -146,7 +137,7 @@ Context:
 Question:
 {question}
 
-Answer with:
+Provide:
 • Summary
 • Key findings
 • Source titles
@@ -182,23 +173,23 @@ with st.sidebar:
     pdfs = st.file_uploader("Upload PDFs", type="pdf", accept_multiple_files=True)
 
     if st.button("Build Knowledge Base"):
-        with st.spinner("Collecting sources..."):
+        with st.spinner("Collecting research..."):
             docs = []
             docs += fetch_arxiv(topic, arxiv_n)
             docs += fetch_pubmed(topic, pubmed_n)
             docs += load_pdfs(pdfs)
 
         if not docs:
-            st.warning("No usable documents found.")
+            st.warning("No documents loaded")
             st.stop()
 
-        with st.spinner("Creating AI knowledge base..."):
-            st.session_state.db = build_vector_db(docs)
+        with st.spinner("Building vector database (one-time)..."):
+            st.session_state.db = build_or_load_vector_db(docs)
 
-        st.success(f"Indexed {len(docs)} documents!")
+        st.success("Knowledge base ready!")
 
 # ------------------------------------------------
-# QA
+# Q&A
 # ------------------------------------------------
 
 if "db" not in st.session_state:
@@ -222,7 +213,7 @@ if question and st.session_state.db:
 # ------------------------------------------------
 
 if st.session_state.db and question:
-    st.subheader("📚 Evidence Used")
+    st.subheader("📚 Evidence Sources")
 
     for doc in st.session_state.db.similarity_search(question, k=4):
         st.markdown(f"""
@@ -231,4 +222,4 @@ Source: {doc.metadata.get('source')}
 """)
         st.divider()
 
-st.caption("Research use only — not medical advice")
+st.caption("For research only — not medical advice")
