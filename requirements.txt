@@ -1,4 +1,25 @@
-streamlit
-requests
-pandas
-groq
+streamlit>=1.32.0
+
+# LangChain core (0.2+ architecture)
+langchain>=0.2.0
+langchain-openai>=0.1.6
+langchain-community>=0.2.0
+langchain-text-splitters>=0.2.0
+
+# Vector database
+faiss-cpu>=1.7.4
+
+# LLM + embeddings
+openai>=1.12.0
+tiktoken>=0.6.0
+
+# Research sources
+arxiv>=2.1.0
+biopython>=1.83
+
+# PDF processing
+pypdf>=4.2.0
+
+# Utilities
+python-dotenv>=1.0.1
+requests>=2.31.0
