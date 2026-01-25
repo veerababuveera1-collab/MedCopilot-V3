@@ -99,7 +99,7 @@ def fetch_pubmed_abstracts(pmids):
 def ai_call(prompt, tokens=350):
     try:
         return client.chat.completions.create(
-            model="llama3-8b-8192",
+            model="llama3-70b-8192",
             messages=[{"role":"user","content":prompt[:2000]}],
             temperature=0.2,
             max_tokens=tokens
@@ -239,3 +239,4 @@ if module=="👤 Patient Workspace":
 
 # ================= FOOTER =================
 st.caption("ĀROGYABODHA AI — Production Clinical Research Intelligence Engine")
+
