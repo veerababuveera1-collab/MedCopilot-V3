@@ -1,11 +1,12 @@
 # ============================================================
-# Clinical Research AI Copilot - Upgraded Cloud-Safe RAG App
+# Clinical Research AI Copilot – Optimized Streamlit RAG App
 # Author: Veera Babu
 # Research only | Not for diagnosis
 # ============================================================
 
 import os
 import tempfile
+import time
 import streamlit as st
 from typing import List
 from dotenv import load_dotenv
@@ -22,14 +23,14 @@ from Bio import Entrez
 import arxiv
 
 # ------------------------------------------------
-# LOAD ENV + FORCE KEY
+# LOAD API KEY
 # ------------------------------------------------
 
 load_dotenv()
 API_KEY = os.getenv("OPENAI_API_KEY")
 
 if not API_KEY:
-    st.error("❌ OPENAI_API_KEY missing. Add it in Streamlit Secrets or .env file.")
+    st.error("❌ OPENAI_API_KEY not set. Add it in Streamlit Secrets or .env file.")
     st.stop()
 
 # ------------------------------------------------
@@ -39,10 +40,10 @@ if not API_KEY:
 st.set_page_config(page_title="Clinical Research AI Copilot", layout="wide")
 
 MODEL_NAME = "gpt-4o-mini"
-Entrez.email = "your_email@example.com"  # change to your email
+Entrez.email = "your_email@example.com"
 
 # ------------------------------------------------
-# AI MODELS (FORCED AUTH)
+# AI SETUP
 # ------------------------------------------------
 
 llm = ChatOpenAI(
@@ -61,13 +62,13 @@ embeddings = OpenAIEmbeddings(
 # ------------------------------------------------
 
 def fetch_arxiv(query, n):
-    docs = []
-    for r in arxiv.Search(query=query, max_results=n).results():
-        docs.append(Document(
+    return [
+        Document(
             page_content=f"Title: {r.title}\nSummary: {r.summary}",
             metadata={"title": r.title, "source": r.entry_id}
-        ))
-    return docs
+        )
+        for r in arxiv.Search(query=query, max_results=n).results()
+    ]
 
 
 def fetch_pubmed(query, n):
@@ -96,31 +97,38 @@ def load_pdfs(files):
     for f in files:
         with tempfile.NamedTemporaryFile(delete=False) as tmp:
             tmp.write(f.read())
-            loader = PyPDFLoader(tmp.name)
-            docs.extend(loader.load())
+            docs.extend(PyPDFLoader(tmp.name).load())
     return docs
 
 # ------------------------------------------------
-# VECTOR DB
+# VECTOR DB (RATE SAFE)
 # ------------------------------------------------
 
 def build_vector_db(docs: List[Document]):
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=900,
-        chunk_overlap=150
+        chunk_size=1600,
+        chunk_overlap=100
     )
     chunks = splitter.split_documents(docs)
 
-    return FAISS.from_documents(chunks, embeddings)
+    for attempt in range(3):
+        try:
+            return FAISS.from_documents(chunks, embeddings)
+        except Exception as e:
+            st.warning(f"⚠️ Rate limit hit. Retrying ({attempt+1}/3)...")
+            time.sleep(10)
+
+    st.error("❌ Failed after multiple retries. Try fewer documents.")
+    st.stop()
 
 # ------------------------------------------------
-# RAG
+# RAG PIPELINE
 # ------------------------------------------------
 
 PROMPT = ChatPromptTemplate.from_template("""
 You are a clinical research assistant.
 
-Use only provided evidence.
+Use only the provided context.
 
 Context:
 {context}
@@ -158,12 +166,10 @@ with st.sidebar:
 
     topic = st.text_input("Search topic", "glioblastoma treatment")
 
-    arxiv_n = st.slider("ArXiv papers", 1, 8, 3)
-    pubmed_n = st.slider("PubMed articles", 1, 8, 3)
+    arxiv_n = st.slider("ArXiv papers", 1, 5, 2)
+    pubmed_n = st.slider("PubMed articles", 1, 5, 2)
 
-    pdfs = st.file_uploader(
-        "Upload PDFs", type="pdf", accept_multiple_files=True
-    )
+    pdfs = st.file_uploader("Upload PDFs", type="pdf", accept_multiple_files=True)
 
     if st.button("Build Knowledge Base"):
         with st.spinner("Collecting sources..."):
@@ -176,7 +182,7 @@ with st.sidebar:
             st.warning("No documents loaded")
             st.stop()
 
-        with st.spinner("Building AI index..."):
+        with st.spinner("Creating AI index..."):
             st.session_state.db = build_vector_db(docs)
 
         st.success(f"Indexed {len(docs)} documents!")
@@ -190,16 +196,16 @@ if "db" not in st.session_state:
 
 st.divider()
 
-question = st.text_input("🔍 Ask a clinical research question")
+question = st.text_input("🔍 Ask research question")
 
 if question and st.session_state.db:
     chain = build_chain(st.session_state.db)
 
-    with st.spinner("Analyzing evidence..."):
-        result = chain.invoke(question)
+    with st.spinner("Analyzing research..."):
+        answer = chain.invoke(question)
 
     st.subheader("📄 AI Answer")
-    st.write(result)
+    st.write(answer)
 
 # ------------------------------------------------
 # CITATIONS
@@ -215,4 +221,4 @@ Source: {doc.metadata.get('source')}
 """)
         st.divider()
 
-st.caption("For research purposes only – not medical advice")
+st.caption("Research use only — not medical advice")
