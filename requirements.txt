@@ -1,25 +1,25 @@
 streamlit>=1.32.0
 
-# LangChain core (0.2+ architecture)
+# LangChain (0.2+ compatible)
 langchain>=0.2.0
-langchain-openai>=0.1.6
 langchain-community>=0.2.0
 langchain-text-splitters>=0.2.0
 
 # Vector database
 faiss-cpu>=1.7.4
 
-# LLM + embeddings
-openai>=1.12.0
-tiktoken>=0.6.0
+# Free embeddings
+sentence-transformers>=2.6.1
 
-# Research sources
+# Local LLM runtime
+ollama>=0.1.8
+
+# Document processing
+pypdf>=4.2.0
+
+# Research data
 arxiv>=2.1.0
 biopython>=1.83
 
-# PDF processing
-pypdf>=4.2.0
-
 # Utilities
-python-dotenv>=1.0.1
 requests>=2.31.0
