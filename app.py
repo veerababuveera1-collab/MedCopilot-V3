@@ -1,48 +1,38 @@
 # ============================================================
-# Clinical Research AI Copilot – Zero Error Stable RAG App
+# Clinical Research AI Copilot — FREE LOCAL RAG (No API Keys)
 # Author: Veera Babu
 # ============================================================
 
 import os
 import tempfile
-import time
 import streamlit as st
 from typing import List
-from dotenv import load_dotenv
 
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain_community.document_loaders import PyPDFLoader
+from langchain_community.llms import Ollama
 
 from Bio import Entrez
 import arxiv
 
 # ---------------- CONFIG ----------------
 
-load_dotenv()
-API_KEY = os.getenv("OPENAI_API_KEY")
+st.set_page_config(page_title="Clinical Research AI Copilot (Free)", layout="wide")
 
-if not API_KEY:
-    st.error("OPENAI_API_KEY missing")
-    st.stop()
-
-st.set_page_config(page_title="Clinical Research AI Copilot", layout="wide")
-
-MODEL_NAME = "gpt-4o-mini"
-VECTOR_PATH = "vector_store"
-
+VECTOR_PATH = "vector_store_free"
 Entrez.email = "your_email@example.com"
 
-# ---------------- AI ----------------
+# ---------------- FREE MODELS ----------------
 
-llm = ChatOpenAI(model=MODEL_NAME, temperature=0, openai_api_key=API_KEY)
-embeddings = OpenAIEmbeddings(
-    model="text-embedding-3-large",
-    openai_api_key=API_KEY
+llm = Ollama(model="llama3")   # or "mistral"
+
+embeddings = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/all-MiniLM-L6-v2"
 )
 
 # ---------------- INGEST ----------------
@@ -90,38 +80,19 @@ def load_pdfs(files):
             docs.extend(PyPDFLoader(tmp.name).load())
     return docs
 
-# ---------------- VECTOR SAFE ----------------
+# ---------------- VECTOR STORE ----------------
 
-def embed_safely(chunks):
-    db = None
-    batch_size = 8
-
-    for i in range(0, len(chunks), batch_size):
-        batch = chunks[i:i + batch_size]
-
-        if db is None:
-            db = FAISS.from_documents(batch, embeddings)
-        else:
-            db.add_documents(batch)
-
-        time.sleep(2)
-
-    return db
-
-
-def build_or_load_vector_db(docs: List[Document]):
+def build_or_load_db(docs: List[Document]):
     if os.path.exists(VECTOR_PATH):
         return FAISS.load_local(VECTOR_PATH, embeddings)
 
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1500,
+        chunk_size=1200,
         chunk_overlap=100
     )
     chunks = splitter.split_documents(docs)
 
-    st.info(f"Embedding {len(chunks)} chunks safely...")
-
-    db = embed_safely(chunks)
+    db = FAISS.from_documents(chunks, embeddings)
     db.save_local(VECTOR_PATH)
 
     return db
@@ -137,11 +108,11 @@ Context:
 Question:
 {question}
 
-Answer with summary, key findings, and citations.
+Give summary, key insights, and evidence.
 """)
 
 def build_chain(db):
-    retriever = db.as_retriever(search_kwargs={"k": 4})
+    retriever = db.as_retriever(k=4)
 
     def join(docs):
         return "\n\n".join(d.page_content for d in docs)
@@ -155,16 +126,19 @@ def build_chain(db):
 
 # ---------------- UI ----------------
 
-st.title("🏥 Clinical Research AI Copilot")
+st.title("🏥 Clinical Research AI Copilot (100% Free)")
 
 with st.sidebar:
     topic = st.text_input("Search topic", "glioblastoma treatment")
+
     arxiv_n = st.slider("ArXiv papers", 1, 3, 1)
     pubmed_n = st.slider("PubMed articles", 1, 3, 1)
+
     pdfs = st.file_uploader("Upload PDFs", type="pdf", accept_multiple_files=True)
 
     if st.button("Build Knowledge Base"):
-        docs = fetch_arxiv(topic, arxiv_n)
+        docs = []
+        docs += fetch_arxiv(topic, arxiv_n)
         docs += fetch_pubmed(topic, pubmed_n)
         docs += load_pdfs(pdfs)
 
@@ -172,8 +146,8 @@ with st.sidebar:
             st.warning("No documents loaded")
             st.stop()
 
-        with st.spinner("Building knowledge base..."):
-            st.session_state.db = build_or_load_vector_db(docs)
+        with st.spinner("Building local AI knowledge base..."):
+            st.session_state.db = build_or_load_db(docs)
 
         st.success("Knowledge base ready!")
 
@@ -188,4 +162,4 @@ if question and st.session_state.db:
     chain = build_chain(st.session_state.db)
     st.write(chain.invoke(question))
 
-st.caption("Research use only")
+st.caption("Runs fully free — no API keys")
