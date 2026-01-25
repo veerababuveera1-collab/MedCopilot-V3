@@ -1,242 +1,181 @@
 # ============================================================
-# ĀROGYABODHA AI — Phase-3 Medical Intelligence OS (GROQ)
-# Clean Clinical Research Intelligence Engine
+# Clinical Research AI Copilot - Streamlit RAG (LangChain 0.2+)
+# Author: Veera Babu
+# Research only | Not for diagnosis
 # ============================================================
 
+import os
+import tempfile
 import streamlit as st
-import os, json, datetime, requests, re
-import pandas as pd
-from groq import Groq
+from typing import List
 
-# ================= GROQ =================
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import FAISS
+from langchain_core.documents import Document
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_community.document_loaders import PyPDFLoader
 
-# ================= CONFIG =================
-st.set_page_config("ĀROGYABODHA AI — Medical Intelligence OS", "🧠", layout="wide")
-st.info("ℹ️ CDSS – Research & clinical decision support only")
+from Bio import Entrez
+import arxiv
 
-PATIENT_DB = "patients.json"
-USERS_DB = "users.json"
+# ------------------------------------------------
+# CONFIG
+# ------------------------------------------------
 
-if not os.path.exists(PATIENT_DB):
-    json.dump([], open(PATIENT_DB, "w"))
+st.set_page_config("Clinical Research AI Copilot", layout="wide")
+MODEL_NAME = "gpt-4o-mini"
 
-if not os.path.exists(USERS_DB):
-    json.dump({
-        "doctor1": {"password": "doctor123", "role": "Doctor"},
-        "researcher1": {"password": "research123", "role": "Researcher"}
-    }, open(USERS_DB, "w"))
+Entrez.email = "your_email@example.com"  # REQUIRED by PubMed
 
-# ================= SESSION =================
-for k in ["logged_in","username","role"]:
-    if k not in st.session_state:
-        st.session_state[k] = None
+# ------------------------------------------------
+# LLM
+# ------------------------------------------------
 
-# ================= LOGIN =================
-def login():
-    st.title("ĀROGYABODHA AI Secure Login")
-    u = st.text_input("User")
-    p = st.text_input("Password", type="password")
-    if st.button("Login"):
-        users = json.load(open(USERS_DB))
-        if u in users and users[u]["password"] == p:
-            st.session_state.logged_in = True
-            st.session_state.username = u
-            st.session_state.role = users[u]["role"]
-            st.rerun()
-        else:
-            st.error("Invalid credentials")
+llm = ChatOpenAI(model=MODEL_NAME, temperature=0)
+embeddings = OpenAIEmbeddings()
 
-if not st.session_state.logged_in:
-    login()
-    st.stop()
+# ------------------------------------------------
+# INGEST SOURCES
+# ------------------------------------------------
 
-# ================= TEXT CLEAN =================
-def clean_text(t):
-    t = re.sub(r"\s+"," ",t)
-    t = re.sub(r"[^\x00-\x7F]+"," ",t)
-    return t.strip()
+def fetch_arxiv(query, max_results):
+    docs = []
+    for r in arxiv.Search(query=query, max_results=max_results).results():
+        docs.append(Document(
+            page_content=f"{r.title}\n{r.summary}",
+            metadata={"title": r.title, "source": r.entry_id}
+        ))
+    return docs
 
-STOPWORDS={"what","are","the","for","in","over","with","of","and","is","to","latest"}
-def normalize(q):
-    q=re.sub(r"[^\w\s]"," ",q.lower())
-    return " ".join(t for t in q.split() if t not in STOPWORDS)
 
-# ================= PUBMED =================
-def fetch_pubmed_ids(q):
-    try:
-        r=requests.get(
-            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
-            params={"db":"pubmed","term":q,"retmode":"json","retmax":5},
-            timeout=15
-        )
-        return r.json()["esearchresult"]["idlist"]
-    except:
-        return []
+def fetch_pubmed(query, max_results):
+    ids = Entrez.read(Entrez.esearch(db="pubmed", term=query, retmax=max_results))["IdList"]
+    docs = []
 
-def fetch_pubmed_abstracts(pmids):
-    abstracts=[]
-    for pid in pmids:
-        try:
-            r=requests.get(
-                "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
-                params={"db":"pubmed","id":pid,"rettype":"abstract","retmode":"text"},
-                timeout=15
-            )
-            text=clean_text(r.text)
+    for pid in ids:
+        article = Entrez.read(Entrez.efetch(db="pubmed", id=pid, retmode="xml"))
+        art = article["PubmedArticle"][0]
+        title = art["MedlineCitation"]["Article"]["ArticleTitle"]
+        abstract = art["MedlineCitation"]["Article"]["Abstract"]["AbstractText"][0]
 
-            if len(text)<300:
-                continue
-            if "doi" in text.lower() and len(text.split())<120:
-                continue
+        docs.append(Document(
+            page_content=f"{title}\n{abstract}",
+            metadata={"title": title, "source": f"PubMed:{pid}"}
+        ))
+    return docs
 
-            abstracts.append(text[:1500])
-        except:
-            pass
-    return abstracts
 
-# ================= SAFE AI =================
-def ai_call(prompt, tokens=350):
-    try:
-        return client.chat.completions.create(
-            model="llama3-70b-8192",
-            messages=[{"role":"user","content":prompt[:2000]}],
-            temperature=0.2,
-            max_tokens=tokens
-        ).choices[0].message.content
-    except:
-        return "Clinical summary unavailable."
+def load_pdfs(uploaded_files):
+    docs = []
+    for file in uploaded_files:
+        with tempfile.NamedTemporaryFile(delete=False) as f:
+            f.write(file.read())
+            loader = PyPDFLoader(f.name)
+            docs.extend(loader.load())
+    return docs
 
-# ================= CLEAN CLINICAL SUMMARIZER =================
-def ai_summarize(abstracts, question):
+# ------------------------------------------------
+# VECTOR DB
+# ------------------------------------------------
 
-    if not abstracts:
-        return "No sufficient clinical abstracts available for meaningful analysis."
+def build_db(docs):
+    splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=150)
+    chunks = splitter.split_documents(docs)
+    return FAISS.from_documents(chunks, embeddings)
 
-    compressed=" ".join(abstracts[:3])
+# ------------------------------------------------
+# RAG CHAIN
+# ------------------------------------------------
 
-    prompt=f"""
-You are a clinical research AI.
+PROMPT = ChatPromptTemplate.from_template("""
+You are a clinical research assistant.
 
-Summarize clearly for doctors.
+Answer only using provided evidence.
 
-FORMAT EXACTLY:
+Context:
+{context}
 
-Summarized Treatments:
-- bullet points
+Question:
+{question}
 
-Clinical Insight:
-- bullet points
+Return:
+• Summary
+• Comparative insights
+• Citations (titles)
+""")
 
-Clinical Conclusion:
-- short paragraph
+def create_chain(db):
+    retriever = db.as_retriever(k=4)
 
-Clinical Evidence:
-{compressed}
-"""
+    def format_docs(docs):
+        return "\n\n".join(d.page_content for d in docs)
 
-    return ai_call(prompt,350)
-
-# ================= LIVE DATA =================
-def fetch_trials(q):
-    try:
-        r=requests.get(
-            "https://clinicaltrials.gov/api/v2/studies",
-            params={"query.term":q,"pageSize":5},
-            timeout=15
-        ).json()
-        rows=[]
-        for s in r.get("studies",[]):
-            i=s["protocolSection"]["identificationModule"]
-            rows.append({"Trial ID":i.get("nctId","N/A"),"Status":"Active/Completed"})
-        return rows
-    except:
-        return []
-
-def fetch_fda():
-    try:
-        r=requests.get(
-            "https://api.fda.gov/drug/enforcement.json?limit=5",
-            timeout=15
-        ).json()
-        return [x["reason_for_recall"] for x in r["results"]]
-    except:
-        return []
-
-# ================= SIDEBAR =================
-st.sidebar.markdown(f"👨‍⚕️ {st.session_state.username}")
-module=st.sidebar.radio("Medical Intelligence Center",[
-    "🔬 Research Copilot",
-    "📊 Dashboard",
-    "👤 Patient Workspace"
-])
-
-# ================= RESEARCH COPILOT =================
-if module=="🔬 Research Copilot":
-
-    st.header("🔬 AI Clinical Research Copilot")
-
-    q=st.text_input(
-        "Ask clinical research question",
-        "What are the latest treatments for glioblastoma in patients over 60?"
+    return (
+        {"context": retriever | format_docs, "question": lambda x: x}
+        | PROMPT
+        | llm
+        | StrOutputParser()
     )
 
-    if st.button("Analyze Research") and q:
+# ------------------------------------------------
+# STREAMLIT UI
+# ------------------------------------------------
 
-        nq=normalize(q)
-        pmids=fetch_pubmed_ids(nq)
-        abstracts=fetch_pubmed_abstracts(pmids)
-        trials=fetch_trials(nq)
-        alerts=fetch_fda()
+st.title("🏥 Clinical Research AI Copilot")
 
-        st.subheader("📊 Evidence Snapshot")
-        c1,c2,c3=st.columns(3)
-        c1.metric("PubMed",len(pmids))
-        c2.metric("Trials",len(trials))
-        c3.metric("FDA Alerts",len(alerts))
+with st.sidebar:
+    st.header("📚 Data Sources")
 
-        st.subheader("🧠 Clinical Research Summary")
-        st.markdown(ai_summarize(abstracts,q))
+    topic = st.text_input("Search topic", "glioblastoma treatment")
 
-        st.subheader("📚 Evidence & Citations")
-        st.dataframe(pd.DataFrame({
-            "PMID":pmids,
-            "Outcome":"Reported benefit",
-            "FDA":"Approved/Trial"
-        }),use_container_width=True)
+    arxiv_n = st.slider("ArXiv papers", 1, 10, 4)
+    pubmed_n = st.slider("PubMed articles", 1, 10, 4)
 
-        if trials:
-            st.subheader("🧪 Clinical Trials")
-            st.dataframe(pd.DataFrame(trials),use_container_width=True)
+    pdfs = st.file_uploader("Upload PDFs", type="pdf", accept_multiple_files=True)
 
-        if alerts:
-            st.subheader("⚠ Regulatory & Safety Alerts")
-            for a in alerts:
-                st.warning(a)
+    if st.button("Build Knowledge Base"):
+        with st.spinner("Collecting research..."):
+            docs = []
+            docs += fetch_arxiv(topic, arxiv_n)
+            docs += fetch_pubmed(topic, pubmed_n)
+            docs += load_pdfs(pdfs)
 
-# ================= DASHBOARD =================
-if module=="📊 Dashboard":
-    st.metric("PubMed Feed","LIVE")
-    st.metric("Clinical Trials","LIVE")
-    st.metric("AI Engine","ACTIVE")
+        with st.spinner("Indexing documents..."):
+            st.session_state.db = build_db(docs)
 
-# ================= PATIENT =================
-if module=="👤 Patient Workspace":
-    patients=json.load(open(PATIENT_DB))
+        st.success(f"Indexed {len(docs)} sources!")
 
-    name=st.text_input("Patient name")
-    age=st.number_input("Age",0,120)
+if "db" not in st.session_state:
+    st.session_state.db = None
 
-    if st.button("Add Patient"):
-        patients.append({
-            "name":name,
-            "age":age,
-            "time":str(datetime.datetime.utcnow())
-        })
-        json.dump(patients,open(PATIENT_DB,"w"))
+st.divider()
 
-    st.dataframe(pd.DataFrame(patients),use_container_width=True)
+question = st.text_input("🔍 Ask clinical research question:")
 
-# ================= FOOTER =================
-st.caption("ĀROGYABODHA AI — Production Clinical Research Intelligence Engine")
+if question and st.session_state.db:
+    chain = create_chain(st.session_state.db)
 
+    with st.spinner("Analyzing evidence..."):
+        answer = chain.invoke(question)
+
+    st.subheader("📄 Evidence-based Answer")
+    st.write(answer)
+
+# ------------------------------------------------
+# CITATION CARDS
+# ------------------------------------------------
+
+if st.session_state.db:
+    st.subheader("📚 Sources Used")
+
+    for doc in st.session_state.db.similarity_search(question, k=4):
+        with st.container():
+            st.markdown(f"""
+            **📄 {doc.metadata.get('title','Document')}**  
+            Source: {doc.metadata.get('source')}
+            """)
+            st.divider()
+
+st.caption("Research only • Not for medical diagnosis")
